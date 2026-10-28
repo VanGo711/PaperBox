@@ -1,9 +1,9 @@
-import { BookOpenCheck, FileText, FolderUp, LoaderCircle, PanelLeftClose, PanelLeftOpen, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { BookOpenCheck, FileText, FolderUp, LoaderCircle, PanelRightClose, PanelRightOpen, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { paperCatalog, type PaperDocument as MaterialDocument } from '../data/paperCatalog';
 import { PdfReader } from '../components/PdfReader';
 
-interface ContentResult { sourcePath: string; title: string; excerpt: string; page?: number; }
+interface ContentResult { sourcePath: string; title: string; before: string; match: string; after: string; page?: number; }
 type PaperListItem = MaterialDocument & { processing?: boolean; jobId?: string; processingError?: string; };
 
 export function TutorialPage() {
@@ -16,8 +16,10 @@ export function TutorialPage() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<PaperListItem | null>(null);
   const [contentQuery, setContentQuery] = useState('');
   const [contentResults, setContentResults] = useState<ContentResult[]>([]);
+  const [contentMatchCount, setContentMatchCount] = useState(0);
   const [highlightQuery, setHighlightQuery] = useState('');
   const [searchingContent, setSearchingContent] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -89,6 +91,7 @@ export function TutorialPage() {
     setActivePdfPage(1);
     setPdfPageCount(0);
     setContentResults([]);
+    setContentMatchCount(0);
     setContentQuery('');
     setHighlightQuery('');
   }, [papers, selectedId]);
@@ -126,9 +129,10 @@ export function TutorialPage() {
     setSearchError('');
     try {
       const response = await fetch(`/paper-api/search?scope=${encodeURIComponent(selected.sourcePath)}&query=${encodeURIComponent(contentQuery.trim())}`);
-      const payload = await response.json() as { results?: ContentResult[]; error?: string };
+      const payload = await response.json() as { results?: ContentResult[]; totalMatches?: number; error?: string };
       if (!response.ok) throw new Error(payload.error ?? '内容检索失败。');
       setContentResults(payload.results ?? []);
+      setContentMatchCount(payload.totalMatches ?? payload.results?.length ?? 0);
       setHighlightQuery(payload.results?.length ? contentQuery.trim() : '');
     } catch (error) {
       setSearchError(error instanceof Error ? error.message : '内容检索失败。');
@@ -139,6 +143,7 @@ export function TutorialPage() {
 
   const closeContentSearch = () => {
     setContentResults([]);
+    setContentMatchCount(0);
     setHighlightQuery('');
   };
 
@@ -153,6 +158,7 @@ export function TutorialPage() {
       setPapers((current) => current.filter((item) => item.id !== paper.id));
       if (selectedId === paper.id) setSelectedId(null);
       closeContentSearch();
+      setDeleteCandidate(null);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : '删除论文失败。');
     } finally {
@@ -205,11 +211,12 @@ export function TutorialPage() {
         <label className="library-type"><SlidersHorizontal size={15} /><select value={category} onChange={(event) => setCategory(event.target.value)}><option>全部类型</option>{allCategories.map((item) => <option key={item}>{item}</option>)}</select></label>
       </div>
       <div className="library-list-summary">{category} · {visibleMaterials.length} 篇论文</div>
-      <div className="library-document-list">{visibleMaterials.map((item) => <MaterialRow key={item.id} item={item} selected={item.id === selected?.id} deleting={deletingId === item.id} onSelect={() => setSelectedId(item.id)} onDelete={() => void deletePaper(item)} />)}{visibleMaterials.length === 0 && <div className="library-list-empty">没有匹配的论文</div>}</div>
+      <div className="library-document-list">{visibleMaterials.map((item) => <MaterialRow key={item.id} item={item} selected={item.id === selected?.id} deleting={deletingId === item.id} onSelect={() => setSelectedId(item.id)} onDelete={() => setDeleteCandidate(item)} />)}{visibleMaterials.length === 0 && <div className="library-list-empty">没有匹配的论文</div>}</div>
     </aside>
     <div className="library-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整论文列表宽度" onPointerDown={startResize} />
-    <section className="library-reader-panel">{selected ? <MaterialDetail item={selected} activePdfPage={activePdfPage} pdfPageCount={pdfPageCount} onSelectPdfPage={setActivePdfPage} onPageCountChange={setPdfPageCount} contentQuery={contentQuery} onContentQueryChange={setContentQuery} onClearContentSearch={() => { setContentQuery(''); closeContentSearch(); }} onSearch={searchContent} contentResults={contentResults} highlightQuery={highlightQuery} onCloseSearch={closeContentSearch} searchingContent={searchingContent} searchError={searchError} importing={importing} importError={importError} onImport={() => importInputRef.current?.click()} /> : <div className="materials-empty">未找到匹配论文</div>}</section>
+    <section className="library-reader-panel">{selected ? <MaterialDetail item={selected} activePdfPage={activePdfPage} pdfPageCount={pdfPageCount} onSelectPdfPage={setActivePdfPage} onPageCountChange={setPdfPageCount} contentQuery={contentQuery} onContentQueryChange={setContentQuery} onClearContentSearch={() => { setContentQuery(''); closeContentSearch(); }} onSearch={searchContent} contentResults={contentResults} contentMatchCount={contentMatchCount} highlightQuery={highlightQuery} onCloseSearch={closeContentSearch} searchingContent={searchingContent} searchError={searchError} importing={importing} importError={importError} onImport={() => importInputRef.current?.click()} /> : <div className="materials-empty">未找到匹配论文</div>}</section>
     <input ref={importInputRef} className="library-import-input" type="file" accept="application/pdf,.pdf" onChange={importPaper} />
+    {deleteCandidate && <div className="library-delete-backdrop" role="presentation" onMouseDown={() => !deletingId && setDeleteCandidate(null)}><section className="library-delete-dialog" role="alertdialog" aria-modal="true" aria-label="确认删除论文" onMouseDown={(event) => event.stopPropagation()}><h2>删除论文？</h2><p>将删除“{deleteCandidate.title}”及其向量、分类和上下文数据。</p><footer><button type="button" onClick={() => setDeleteCandidate(null)} disabled={Boolean(deletingId)}>取消</button><button type="button" className="danger" onClick={() => void deletePaper(deleteCandidate)} disabled={Boolean(deletingId)}>{deletingId ? <LoaderCircle className="spin" size={15} /> : '删除'}</button></footer></section></div>}
   </div>;
 }
 
@@ -219,10 +226,10 @@ function MaterialRow({ item, selected, deleting, onSelect, onDelete }: { item: P
 }
 
 interface MaterialDetailProps {
-  item: MaterialDocument; activePdfPage: number; pdfPageCount: number; onSelectPdfPage(page: number): void; onPageCountChange(count: number): void; contentQuery: string; onContentQueryChange(value: string): void; onClearContentSearch(): void; onSearch(event: FormEvent): void; contentResults: ContentResult[]; highlightQuery: string; onCloseSearch(): void; searchingContent: boolean; searchError: string; importing: boolean; importError: string; onImport(): void;
+  item: MaterialDocument; activePdfPage: number; pdfPageCount: number; onSelectPdfPage(page: number): void; onPageCountChange(count: number): void; contentQuery: string; onContentQueryChange(value: string): void; onClearContentSearch(): void; onSearch(event: FormEvent): void; contentResults: ContentResult[]; contentMatchCount: number; highlightQuery: string; onCloseSearch(): void; searchingContent: boolean; searchError: string; importing: boolean; importError: string; onImport(): void;
 }
 
-function MaterialDetail({ item, activePdfPage, pdfPageCount, onSelectPdfPage, onPageCountChange, contentQuery, onContentQueryChange, onClearContentSearch, onSearch, contentResults, highlightQuery, onCloseSearch, searchingContent, searchError, importing, importError, onImport }: MaterialDetailProps) {
+function MaterialDetail({ item, activePdfPage, pdfPageCount, onSelectPdfPage, onPageCountChange, contentQuery, onContentQueryChange, onClearContentSearch, onSearch, contentResults, contentMatchCount, highlightQuery, onCloseSearch, searchingContent, searchError, importing, importError, onImport }: MaterialDetailProps) {
   const [chapterPanelVisible, setChapterPanelVisible] = useState(() => localStorage.getItem('material-chapter-panel-visible') !== 'false');
   const [chapterPanelWidth, setChapterPanelWidth] = useState(() => Math.min(560, Math.max(220, Number(localStorage.getItem('material-chapter-panel-width')) || 320)));
   const chapterPanelWidthRef = useRef(chapterPanelWidth);
@@ -239,7 +246,7 @@ function MaterialDetail({ item, activePdfPage, pdfPageCount, onSelectPdfPage, on
     document.body.classList.add('is-resizing-chapters');
     const resize = (moveEvent: globalThis.PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
-      pendingWidth = Math.max(220, Math.min(560, startWidth + moveEvent.clientX - startX));
+      pendingWidth = Math.max(220, Math.min(560, startWidth - moveEvent.clientX + startX));
       if (animationFrame) return;
       animationFrame = window.requestAnimationFrame(() => {
         animationFrame = 0;
@@ -272,11 +279,11 @@ function MaterialDetail({ item, activePdfPage, pdfPageCount, onSelectPdfPage, on
   };
   return <div className="library-detail">
     <div ref={workspaceRef} className={`library-workspace${chapterPanelVisible ? '' : ' is-chapter-panel-hidden'}`} style={{ '--chapter-panel-width': `${chapterPanelWidth}px` } as CSSProperties}>
-      {chapterPanelVisible && <><aside className="library-summary-panel"><div className="library-chapter-heading"><button type="button" className="chapter-panel-close" title="收起内容摘要" aria-label="收起内容摘要" onClick={toggleChapterPanel}><PanelLeftClose size={15} /></button><span>内容摘要</span></div><div className="library-summary-scroll"><section className="library-summary-title"><strong>{item.title}</strong><small>{item.researchArea || item.category}</small></section><dl className="library-summary-meta"><div><dt>作者</dt><dd>{item.author || '未标注'}</dd></div><div><dt>研究领域</dt><dd>{item.researchArea || item.category || '未分类'}</dd></div></dl><section><h3>论文标签</h3><div className="library-summary-tags">{(item.tags?.length ? item.tags : [item.category]).map((tag) => <span key={tag}>{tag}</span>)}</div></section><section><h3>摘要</h3><p>{item.abstract || '暂无摘要信息。'}</p></section><section><h3>内容总结</h3><p>{item.summary || item.preview || '暂无内容总结。'}</p></section></div></aside><div className="chapter-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整内容摘要宽度" onPointerDown={startChapterResize} /></>}
-      <article className="library-reading-panel" onClick={onCloseSearch}><div className="library-reader-toolbar">{!chapterPanelVisible && <button type="button" className="chapter-panel-toggle" title="打开内容摘要" aria-label="打开内容摘要" onClick={toggleChapterPanel}><PanelLeftOpen size={16} /></button>}<div title={item.title}><span>论文 PDF</span><small>{pdfPageCount ? `${activePdfPage} / ${pdfPageCount} 页` : '正在读取页数...'}</small></div><form onClick={(event) => event.stopPropagation()} onSubmit={onSearch}><label><Search size={15} /><input value={contentQuery} onChange={(event) => onContentQueryChange(event.target.value)} placeholder="检索 PDF 内容" />{contentQuery && <button type="button" className="library-clear-search" title="清除 PDF 检索" aria-label="清除 PDF 检索" onClick={onClearContentSearch}><X size={14} /></button>}</label><button type="submit" disabled={searchingContent || !contentQuery.trim() || !item.pdfPath}>{searchingContent ? <LoaderCircle className="spin" size={15} /> : '检索'}</button><button type="button" className="library-import-button" onClick={onImport} disabled={importing} title="导入新的论文 PDF"><FolderUp size={15} />{importing ? '导入中' : '导入'}</button></form></div>
+      {chapterPanelVisible && <><aside className="library-summary-panel"><div className="library-chapter-heading"><span>内容摘要</span></div><div className="library-summary-scroll"><section className="library-summary-title"><strong>{item.title}</strong><small>{item.researchArea || item.category}</small></section><dl className="library-summary-meta"><div><dt>作者</dt><dd>{item.author || '未标注'}</dd></div><div><dt>研究领域</dt><dd>{item.researchArea || item.category || '未分类'}</dd></div></dl><section><h3>论文标签</h3><div className="library-summary-tags">{(item.tags?.length ? item.tags : [item.category]).map((tag) => <span key={tag}>{tag}</span>)}</div></section><section><h3>摘要</h3><p>{item.abstract || '暂无摘要信息。'}</p></section><section><h3>内容总结</h3><p>{item.summary || item.preview || '暂无内容总结。'}</p></section></div></aside><div className="chapter-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整内容摘要宽度" onPointerDown={startChapterResize} /></>}
+      <article className="library-reading-panel" onClick={onCloseSearch}><div className="library-reader-toolbar"><button type="button" className="library-import-button" onClick={onImport} disabled={importing} title="导入新的论文 PDF"><FolderUp size={15} />{importing ? '导入中' : '导入'}</button><form onClick={(event) => event.stopPropagation()} onSubmit={onSearch}><label><Search size={15} /><input value={contentQuery} onChange={(event) => onContentQueryChange(event.target.value)} placeholder="检索 PDF 内容" />{contentQuery && <button type="button" className="library-clear-search" title="清除 PDF 检索" aria-label="清除 PDF 检索" onClick={onClearContentSearch}><X size={14} /></button>}</label><button type="submit" className="library-search-submit" disabled={searchingContent || !contentQuery.trim() || !item.pdfPath} title="检索 PDF 内容" aria-label="检索 PDF 内容">{searchingContent ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}</button></form><div className="library-reader-title" title={item.title}><span>论文 PDF</span><small>{pdfPageCount ? `${activePdfPage} / ${pdfPageCount} 页` : '正在读取页数...'}</small></div><button type="button" className="chapter-panel-toggle" title={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} aria-label={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} onClick={toggleChapterPanel}>{chapterPanelVisible ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button></div>
         {searchError && <div className="library-message error">{searchError}</div>}
         {importError && <div className="library-message error">{importError}</div>}
-        {contentResults.length > 0 && <div className="library-search-results" onClick={(event) => event.stopPropagation()}><header><strong>检索到 {contentResults.length} 处匹配</strong><button type="button" title="关闭检索结果" aria-label="关闭检索结果" onClick={onCloseSearch}><X size={15} /></button></header>{contentResults.map((result, index) => <button key={`${result.sourcePath}-${result.page ?? 0}-${index}`} onClick={() => onSelectPdfPage(result.page ?? 1)}><span>{result.page ? `第 ${result.page} 页 · ${result.title}` : result.title}</span><small>{result.excerpt}</small></button>)}</div>}
+        {contentResults.length > 0 && <div className="library-search-results" onClick={(event) => event.stopPropagation()}><header><strong>检索到 {contentMatchCount} 处匹配</strong><button type="button" title="关闭检索结果" aria-label="关闭检索结果" onClick={onCloseSearch}><X size={15} /></button></header>{contentResults.map((result, index) => <button key={`${result.sourcePath}-${result.page ?? 0}-${index}`} onClick={() => onSelectPdfPage(result.page ?? 1)}><span>{result.page ? `第 ${result.page} 页` : result.title}</span><small>{result.before}<mark>{result.match}</mark>{result.after}</small></button>)}</div>}
         {item.pdfPath ? <div className="library-pdf"><PdfReader src={`/paper-api/pdf?path=${encodeURIComponent(item.pdfPath)}`} activePage={activePdfPage} onPageCount={onPageCountChange} onCurrentPageChange={onSelectPdfPage} highlightQuery={highlightQuery} /></div> : <div className="library-pdf-empty"><FileText size={26} /><strong>暂无论文 PDF</strong><span>请点击右上角“导入”，选择要管理的论文 PDF 文件。</span><button type="button" onClick={onImport}><FolderUp size={15} />导入 PDF</button></div>}
       </article>
     </div>

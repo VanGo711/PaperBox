@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CircleAlert, Database, FileText, LoaderCircle, MessageSquareText, PanelLeft, Plus, RotateCcw, Search, Send, Sparkles, Tags, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleAlert, Database, FileText, LoaderCircle, MessageSquareText, PanelLeft, Plus, RotateCcw, Search, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { MarkdownReader } from '../components/MarkdownReader';
@@ -189,7 +189,7 @@ export function KnowledgePage() {
     } else if (retryId) updateTurn(conversationId, turnId, { ...turn, error: undefined });
     else setConversations((items) => items.map((item) => item.id !== conversationId ? item : { ...item, turns: [...item.turns, turn] }));
     try {
-      const retrieval = await request<Retrieval>('/api/knowledge/retrieve', { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, limit: 12, previous_questions: history.filter((item) => item.role === 'user').map((item) => item.content) }) });
+      const retrieval = await request<Retrieval>('/api/knowledge/retrieve', { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, limit: 20, previous_questions: history.filter((item) => item.role === 'user').map((item) => item.content) }) });
       updateTurn(conversationId, turnId, { retrieval });
       if (!retrieval.context.trim()) throw new Error('没有检索到可用于回答的论文片段，请补充论文主题、方法或数据集名称。');
       setStage('正在依据检索论文生成回答…');
@@ -268,7 +268,6 @@ function ChatTurn({ turn, stage, streamingAnswer, canRetry, onRetry, onSource }:
         return source ? <button className="insight-citation" title={`查看 ${sourceTitle(source).file} 原文`} onClick={() => onSource(source)}>[{id}]</button> : <span className="insight-invalid-citation" title="本轮资料中没有此编号">[{id}]</span>;
       }} /></div> : stage ? <>{streamingAnswer ? <div className="insight-answer insight-answer-streaming">{streamingAnswer}<span className="insight-stream-cursor" /></div> : <div className="insight-assistant-loading" role="status"><LoaderCircle className="spin" size={16} /><span>{stage}</span></div>}</> : <div className="insight-turn-error" role="alert"><CircleAlert size={16} /><span>{turn.error || '上次回答未完成，可重新生成。'}</span>{canRetry && <button onClick={onRetry}><RotateCcw size={13} />重试</button>}</div>}
       {retrieval && <div className="insight-execution"><div className="insight-execution-summary"><span><Database size={12} />{retrieval.sources.length} 个论文片段</span><span>{turn.model}</span></div>
-        <details><summary><Tags size={15} />论文分类解析<ChevronDown size={14} /></summary><div className="insight-parsed"><div><small>分类</small>{retrieval.parsed.concepts.length ? retrieval.parsed.concepts.map((item) => <span key={item}>{item}</span>) : <em>未匹配到论文分类</em>}</div><div><small>实体</small>{retrieval.parsed.entities.length ? retrieval.parsed.entities.map((item) => <span key={item}>{item}</span>) : <em>未识别到命名实体</em>}</div></div></details>
         <details><summary><FileText size={15} />检索论文<ChevronDown size={14} /></summary><div className="insight-source-list">{retrieval.sources.map((source) => { const title = sourceTitle(source); return <button key={source.id} onClick={() => onSource(source)}><b>{source.id}</b><span><strong>{source.book || title.file}</strong><small>{title.chapter || title.file} · {source.line_start > 0 ? `第 ${source.line_start}–${source.line_end} 行` : '暂无行号'}</small></span><em title="向量余弦相似度">相似度 {source.score.toFixed(3)}</em><ChevronRight size={14} /></button>; })}{!retrieval.sources.length && <p>未找到匹配论文。</p>}</div></details>
       </div>}
     </div></div>

@@ -10,6 +10,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { FormEvent, type PointerEvent as ReactPointerEvent, useEffect, useState } from 'react';
+import { SourceDrawer } from '../knowledge/SourceDrawer';
+import type { Source } from '../knowledge/conversations';
 
 interface VectorStatus {
   collection: string;
@@ -79,6 +81,13 @@ interface SearchResult {
   chunk_index: number;
 }
 
+interface PaperReference {
+  title: string;
+  sourcePath: string;
+  id: string;
+  pdfPath?: string;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options);
   const payload = (await response.json().catch(() => ({}))) as T & {
@@ -94,16 +103,34 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 function resultPreview(content: string) {
-  return content.replace(/^\s*章节[：:][^\n]*(?:\n\s*)+/, '').trim();
+  return content
+    .replace(/^\s*论文[：:][^\n]*(?:\n\s*)+页码[：:][^\n]*(?:\n\s*)*/i, '')
+    .replace(/^\s*第\s*\d+\s*页\s*(?:\n\s*)*/i, '')
+    .replace(/^\s*章节[：:][^\n]*(?:\n\s*)+/, '')
+    .replace(/\n[ \t]*\n+/g, '\n')
+    .trim();
 }
 
-function resultSection(sourcePath: string, headingPath: string, chapter: string) {
-  const heading = headingPath || chapter;
-  const fileStem = sourcePath.split('/').pop()?.replace(/\.md$/i, '') ?? '';
-  const chapterStem = fileStem.replace(/^ch\d+[-_]*/i, '');
-  const parts = heading.split(/\s*>\s*/).filter(Boolean);
-  if (parts[0] === fileStem || parts[0] === chapterStem) parts.shift();
-  return parts.join(' > ');
+function fallbackPaperTitle(sourcePath: string) {
+  const fileName = sourcePath.replace(/\\/g, '/').split('/').pop() ?? '未命名论文';
+  return fileName.replace(/\.(md|pdf|txt)$/i, '') || '未命名论文';
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function HighlightedResult({ content, query }: { content: string; query: string }) {
+  const value = resultPreview(content);
+  const keyword = query.trim();
+  if (!keyword) return <>{value}</>;
+  const parts = value.split(new RegExp(`(${escapeRegExp(keyword)})`, 'ig'));
+  return <>{parts.map((part, index) => index % 2 ? <mark key={index}>{part}</mark> : part)}</>;
+}
+
+function resultPageLabel(result: SearchResult) {
+  const match = `${result.chapter} ${result.heading_path} ${result.content}`.match(/第\s*(\d+)\s*页/);
+  return match ? `第 ${match[1]} 页` : result.line_start > 0 ? `第 ${result.line_start}–${result.line_end} 行` : '页码未知';
 }
 
 export function VectorPage() {
@@ -120,6 +147,8 @@ export function VectorPage() {
     chapters: [],
   });
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [source, setSource] = useState<Source | null>(null);
+  const [papers, setPapers] = useState<PaperReference[]>([]);
   const [loading, setLoading] = useState(true);
   const [filtersLoading, setFiltersLoading] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -183,6 +212,25 @@ export function VectorPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<{ papers?: PaperReference[] }>('/paper-api/catalog', { signal: controller.signal })
+      .then((payload) => setPapers(payload.papers ?? []))
+      .catch(() => setPapers([]));
+    return () => controller.abort();
+  }, []);
+
+  const paperTitle = (sourcePath: string) => {
+    const normalized = sourcePath.replace(/\\/g, '/').replace(/^data\/papers\//, '');
+    const matched = papers.find((paper) => {
+      const id = paper.id.replace(/\\/g, '/');
+      const documentPath = paper.sourcePath.replace(/\\/g, '/').replace(/^data\/papers\//, '');
+      const pdfPath = paper.pdfPath?.replace(/\\/g, '/').replace(/^data\/papers\//, '') ?? '';
+      return normalized === id || normalized.startsWith(id + '/') || normalized === documentPath || normalized.startsWith(documentPath + '/') || normalized === pdfPath;
+    });
+    return matched?.title?.trim() || fallbackPaperTitle(sourcePath);
+  };
 
   const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -415,19 +463,16 @@ export function VectorPage() {
                 匹配到 {results.length} 个相关文本块
               </div>
               {results.map((result) => (
-                <article className="vector-result" key={result.id}>
-                  <header>
-                    <div className="vector-result-origin">
-                      <strong title={result.source_path}>{result.source_path}</strong>
-                      {resultSection(result.source_path, result.heading_path, result.chapter) && (
-                        <small>{resultSection(result.source_path, result.heading_path, result.chapter)}</small>
-                      )}
-                      <span>第 {result.line_start}–{result.line_end} 行 · 块 #{result.chunk_index + 1}</span>
+                <button type="button" className="vector-result" key={result.id} onClick={() => setSource(result)}>
+                    <div className="vector-result-copy">
+                      <header>
+                        <strong title={paperTitle(result.source_path)}>{paperTitle(result.source_path)}</strong>
+                        <span>{resultPageLabel(result)}</span>
+                        <b title="向量余弦相似度">{result.score.toFixed(3)}</b>
+                      </header>
+                      <p><HighlightedResult content={result.content} query={query} /></p>
                     </div>
-                    <b>{result.score.toFixed(3)}</b>
-                  </header>
-                  <p>{resultPreview(result.content)}</p>
-                </article>
+                </button>
               ))}
             </div>
           )}
@@ -453,6 +498,7 @@ export function VectorPage() {
           </section>
         </div>
       )}
+      {source && <SourceDrawer source={source} onClose={() => setSource(null)} />}
     </main>
   );
 }

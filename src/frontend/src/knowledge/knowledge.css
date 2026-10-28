@@ -130,6 +130,7 @@
 .insight-source-excerpt p { font-size:12px; line-height:1.8; white-space:pre-wrap; }
 .insight-source-body { flex:1; min-height:0; overflow:auto; padding:22px; font-size:13px; line-height:1.9; }
 .insight-source-body .is-cited { outline:2px solid var(--primary); outline-offset:3px; border-radius:3px; background:var(--primary-weak); }
+.insight-source-snippet { min-height:0; flex:1; margin:0; padding:24px 22px 42px; overflow:auto; color:var(--text); font-size:14px; line-height:1.85; white-space:pre-wrap; overflow-wrap:anywhere; }
 @media (max-width:900px) {
   .insights-page { grid-template-columns:min(var(--insight-conversation-width,210px),210px) 5px minmax(0,1fr); }
   .insight-message-list { padding-inline:18px; }

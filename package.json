@@ -7,6 +7,7 @@
     "dev:frontend": "npm --prefix src/frontend run dev",
     "start": "conda run --no-capture-output -n paper uvicorn src.backend.main:app --host 127.0.0.1 --port 9200",
     "seed:papers": "conda run --no-capture-output -n paper python scripts/seed-default-papers.py",
+    "papers:reindex": "conda run --no-capture-output -n paper python scripts/reindex-paper-pdfs.py",
     "papers:reclassify": "conda run --no-capture-output -n paper python scripts/reclassify-paper-catalog.py",
     "concepts:properties": "node scripts/extract-concept-properties.mjs"
   }

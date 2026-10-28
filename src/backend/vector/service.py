@@ -37,7 +37,6 @@ class PaperVectorService:
         try:
             import seekdb
             self._instance = seekdb.open(str(self.settings.seekdb_dir))
-            self._connection_options = self._instance.connection_options()
         except ImportError as error:
             raise VectorServiceError("未安装 seekdb，请执行 pip install -r requirements.txt。") from error
         except Exception as error:
@@ -46,20 +45,43 @@ class PaperVectorService:
 
     def _connection(self):
         try:
-            import pymysql
-            return pymysql.connect(database="test", autocommit=True, charset="utf8mb4", **self._connection_options)
+            return self._instance.connect(database="test", autocommit=True)
         except Exception as error:
             raise VectorServiceError(f"无法连接 SeekDB：{error}") from error
 
-    def _query(self, statement: str, values: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    @staticmethod
+    def _sql_literal(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise VectorServiceError("SQL 参数不能是无穷或 NaN。")
+            return repr(value)
+        if isinstance(value, str):
+            return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+        raise VectorServiceError(f"不支持的 SQL 参数类型：{type(value).__name__}")
+
+    @classmethod
+    def _bind(cls, statement: str, values: tuple[Any, ...]) -> str:
+        if statement.count("%s") != len(values):
+            raise VectorServiceError("SeekDB SQL 参数数量不匹配。")
+        for value in values:
+            statement = statement.replace("%s", cls._sql_literal(value), 1)
+        return statement
+
+    def _query(self, statement: str, values: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         connection = self._connection()
         try:
-            with connection.cursor() as cursor:
-                cursor.execute(statement, values)
-                if not cursor.description:
-                    return []
-                keys = [column[0] for column in cursor.description]
-                return [dict(zip(keys, row, strict=True)) for row in cursor.fetchall()]
+            cursor = connection.cursor()
+            try:
+                cursor.execute(self._bind(statement, values))
+                return list(cursor.fetchall())
+            finally:
+                cursor.close()
         finally:
             connection.close()
 
@@ -70,7 +92,7 @@ class PaperVectorService:
         if not self._table_exists():
             return None
         rows = self._query(f"SHOW CREATE TABLE `{self.settings.table_name}`")
-        definition = str(list(rows[0].values())[-1]) if rows else ""
+        definition = str(rows[0][-1]) if rows else ""
         match = re.search(r"`vector`\s+vector\((\d+)\)", definition, flags=re.IGNORECASE)
         return int(match.group(1)) if match else None
 
@@ -119,14 +141,17 @@ class PaperVectorService:
             self._ensure_table(len(vectors[0]))
             connection = self._connection()
             try:
-                with connection.cursor() as cursor:
-                    cursor.executemany(
-                        f"""INSERT INTO `{self.settings.table_name}`
+                cursor = connection.cursor()
+                try:
+                    statement = f"""INSERT INTO `{self.settings.table_name}`
                         (id, vector, content, source_path, category, book, chapter, heading_path, line_start, line_end, char_start, char_end, chunk_index, document_hash)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE vector=VALUES(vector), content=VALUES(content), category=VALUES(category), book=VALUES(book), chapter=VALUES(chapter), heading_path=VALUES(heading_path), line_start=VALUES(line_start), line_end=VALUES(line_end), char_start=VALUES(char_start), char_end=VALUES(char_end), chunk_index=VALUES(chunk_index), document_hash=VALUES(document_hash)""",
-                        [(chunk.id, json.dumps(vector), chunk.text, chunk.source_path, chunk.category, chunk.book, chunk.chapter, chunk.heading_path, chunk.line_start, chunk.line_end, chunk.char_start, chunk.char_end, chunk.chunk_index, chunk.document_hash) for chunk, vector in zip(batch, vectors, strict=True)],
-                    )
+                        ON DUPLICATE KEY UPDATE vector=VALUES(vector), content=VALUES(content), category=VALUES(category), book=VALUES(book), chapter=VALUES(chapter), heading_path=VALUES(heading_path), line_start=VALUES(line_start), line_end=VALUES(line_end), char_start=VALUES(char_start), char_end=VALUES(char_end), chunk_index=VALUES(chunk_index), document_hash=VALUES(document_hash)"""
+                    for chunk, vector in zip(batch, vectors, strict=True):
+                        values = (chunk.id, json.dumps(vector), chunk.text, chunk.source_path, chunk.category, chunk.book, chunk.chapter, chunk.heading_path, chunk.line_start, chunk.line_end, chunk.char_start, chunk.char_end, chunk.chunk_index, chunk.document_hash)
+                        cursor.execute(self._bind(statement, values))
+                finally:
+                    cursor.close()
             finally:
                 connection.close()
 
@@ -205,18 +230,30 @@ class PaperVectorService:
                 values.extend(selected)
         clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         chapter_rows = self._query(f"SELECT DISTINCT chapter FROM `{self.settings.table_name}`{clause} ORDER BY chapter", tuple(values))
-        return {"collection": self.settings.table_name, "categories": [str(row["category"]) for row in category_rows], "books": [str(row["book"]) for row in book_rows], "chapters": [str(row["chapter"]) for row in chapter_rows]}
+        return {"collection": self.settings.table_name, "categories": [str(row[0]) for row in category_rows], "books": [str(row[0]) for row in book_rows], "chapters": [str(row[0]) for row in chapter_rows]}
 
     @staticmethod
     def _cosine(left: list[float], right: list[float]) -> float:
         denominator = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(x * x for x in right))
         return 0.0 if not denominator else sum(a * b for a, b in zip(left, right, strict=True)) / denominator
 
+    @staticmethod
+    def _lexical_search(rows: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
+        terms = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]", query.casefold())))
+        ranked = []
+        for row in rows:
+            content = str(row.get("content", "")).casefold()
+            score = sum(content.count(term) for term in terms)
+            if score:
+                row.pop("vector", None)
+                row["score"] = score / max(1, len(terms))
+                ranked.append(row)
+        return sorted(ranked, key=lambda item: float(item["score"]), reverse=True)[:limit]
+
     def search(self, *, query: str, limit: int, categories: list[str] | None = None, books: list[str] | None = None, chapters: list[str] | None = None) -> list[dict[str, Any]]:
         if not self._table_exists():
             return []
         try:
-            vector = self.embeddings.embed([query])[0]
             conditions, values = [], []
             for column, selected in (("category", categories), ("book", books), ("chapter", chapters)):
                 clean = [value for value in selected or [] if value]
@@ -224,7 +261,12 @@ class PaperVectorService:
                     conditions.append(f"{column} IN ({','.join(['%s'] * len(clean))})")
                     values.extend(clean)
             clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-            rows = self._query(f"SELECT id, vector, content, source_path, category, book, chapter, heading_path, line_start, line_end, char_start, char_end, chunk_index, document_hash FROM `{self.settings.table_name}`{clause}", tuple(values))
+            columns = ("id", "vector", "content", "source_path", "category", "book", "chapter", "heading_path", "line_start", "line_end", "char_start", "char_end", "chunk_index", "document_hash")
+            rows = [dict(zip(columns, raw_row, strict=True)) for raw_row in self._query(f"SELECT {', '.join(columns)} FROM `{self.settings.table_name}`{clause}", tuple(values))]
+            try:
+                vector = self.embeddings.embed([query])[0]
+            except OllamaEmbeddingError:
+                return self._lexical_search(rows, query, limit)
             ranked = []
             for row in rows:
                 try:
@@ -234,15 +276,13 @@ class PaperVectorService:
                 row["score"] = score
                 ranked.append(row)
             return sorted(ranked, key=lambda item: float(item["score"]), reverse=True)[:limit]
-        except OllamaEmbeddingError as error:
-            raise VectorServiceError(str(error)) from error
         except Exception as error:
             raise VectorServiceError(f"SeekDB 向量检索失败：{error}") from error
 
     def status(self) -> dict[str, Any]:
         try:
             created = self._table_exists()
-            rows = self._query(f"SELECT COUNT(*) AS rows FROM `{self.settings.table_name}`")[0]["rows"] if created else 0
+            rows = self._query(f"SELECT COUNT(*) AS rows FROM `{self.settings.table_name}`")[0][0] if created else 0
             return {"collection": self.settings.table_name, "created": created, "rows": int(rows), "embedding_model": self.settings.embedding_model, "paper_root": str(self.settings.paper_root)}
         except Exception as error:
             raise VectorServiceError(f"SeekDB 状态读取失败：{error}") from error
@@ -253,8 +293,8 @@ class PaperVectorService:
             fields = []
             if created:
                 for row in self._query(f"DESCRIBE `{self.settings.table_name}`"):
-                    role, index = self.FIELD_ROLES.get(str(row["Field"]), ("字段", "—"))
-                    fields.append({"name": str(row["Field"]), "type": str(row["Type"]).upper(), "role": role, "index": index})
+                    role, index = self.FIELD_ROLES.get(str(row[0]), ("字段", "—"))
+                    fields.append({"name": str(row[0]), "type": str(row[1]).upper(), "role": role, "index": index})
             return {"engine": "SeekDB", "storage": str(self.settings.seekdb_dir), "collection": self.settings.table_name, "created": created, "embedding_model": self.settings.embedding_model, "dimension": self._dimension(), "fields": fields}
         except Exception as error:
             raise VectorServiceError(f"SeekDB 结构读取失败：{error}") from error

@@ -47,25 +47,35 @@ export function ModelsPage() {
       if (!nextPlatform) setLoadingModels(false);
     } catch (requestError) { setError(requestError instanceof Error ? requestError.message : '模型平台读取失败。'); setLoadingModels(false); }
   };
-  const loadModels = async (platformId?: string) => {
+  const applyModels = (platformId: string, payload: CachedModels) => {
+    const nextModels = filterChatModels(payload.models ?? []);
+    const selectedIds = new Set(payload.selection?.enabledModelIds ?? nextModels.map((model) => model.id));
+    const nextEnabled = nextModels.filter((model) => selectedIds.has(model.id)).map((model) => knowledgeModelKey(platformId, model.id));
+    setModels(nextModels); setQuotas(payload.quotas ?? []); setUsage(payload.usage?.models ?? {}); setEnabledModelKeys(nextEnabled); saveEnabledChatModelKeys(nextEnabled); setTestStates({});
+  };
+  const loadModels = async (platformId?: string, refresh = false) => {
     if (!platformId) return;
-    setSyncing(true); setError('');
+    if (refresh) setSyncing(true);
+    setError('');
     try {
-      const response = await fetch('/model-api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platformId }) });
+      const response = refresh
+        ? await fetch('/model-api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platformId }) })
+        : await fetch('/model-api/cache?platformId=' + encodeURIComponent(platformId));
       const payload = await response.json() as CachedModels;
-      if (!response.ok) throw new Error(payload.error ?? '模型同步失败。');
-      const nextModels = filterChatModels(payload.models ?? []);
-      const selectedIds = new Set(payload.selection?.enabledModelIds ?? nextModels.map((model) => model.id));
-      const nextEnabled = nextModels.filter((model) => selectedIds.has(model.id)).map((model) => knowledgeModelKey(platformId, model.id));
-      setModels(nextModels); setQuotas(payload.quotas ?? []); setUsage(payload.usage?.models ?? {}); setEnabledModelKeys(nextEnabled); saveEnabledChatModelKeys(nextEnabled); setTestStates({});
-    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : '模型同步失败。'); }
+      if (!response.ok) throw new Error(payload.error ?? (refresh ? '模型同步失败。' : '模型缓存读取失败。'));
+      applyModels(platformId, payload);
+      return Boolean(payload.models?.length);
+    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : (refresh ? '模型同步失败。' : '模型缓存读取失败。')); return false; }
     finally { setSyncing(false); setLoadingModels(false); }
   };
   useEffect(() => { void loadPlatform(); }, []);
-  useEffect(() => { void loadModels(platform?.id); }, [platform?.id]);
+  useEffect(() => {
+    if (!platform?.id) return;
+    void loadModels(platform.id);
+  }, [platform?.id]);
 
   const syncModels = async () => {
-    await loadModels(platform?.id);
+    await loadModels(platform?.id, true);
   };
   const testModel = async (model: Model) => {
     if (!platform) return;
@@ -112,7 +122,7 @@ export function ModelsPage() {
       return <div key={model.id} className="model-selection-row"><span className="model-selection-name"><strong>{model.name}</strong></span><span className="model-capabilities">{model.capabilities?.join(' · ') || '—'}</span><LocalUsageMeter value={localUsage?.requests} unit="次" title={`本系统成功调用累计${requestLimit}`} /><LocalUsageMeter value={localUsage?.totalTokens} unit="Tokens" title={`本系统成功调用累计（输入 ${localUsage?.inputTokens ?? 0} / 输出 ${localUsage?.outputTokens ?? 0}）${tokenLimit}`} /><span className="model-test-cell"><button type="button" disabled={test?.status === 'testing'} onClick={() => { void testModel(model); }}>{test?.status === 'testing' ? '测试中…' : '测试'}</button>{test && test.status !== 'testing' && <small className={test.status}>{test.status === 'success' ? '可用 · pong' : '失败'}</small>}</span><span className="model-selection-choice"><input type="checkbox" checked={enabledModelKeys.includes(key)} onChange={(event) => { void toggleChatModel(model, event.target.checked); }} aria-label={`在知识问答中使用 ${model.name}`} /></span></div>;
     })}</section>}
     {loadingModels && <div className="model-selection-empty">正在读取模型…</div>}
-    {!loadingModels && !models.length && !error && <div className="model-selection-empty">没有符合条件的文本生成模型。</div>}
+    {!loadingModels && !models.length && !error && <div className="model-selection-empty">本地尚无模型缓存，请点击右上角刷新模型列表。</div>}
     {testError && <div className="model-modal-backdrop" role="presentation" onMouseDown={() => setTestError(null)}><section className="model-modal model-test-error-modal" role="alertdialog" aria-modal="true" aria-label="模型测试失败" onMouseDown={(event) => event.stopPropagation()}><button type="button" className="model-modal-close" onClick={() => setTestError(null)}><X size={17} /></button><CircleAlert size={21} /><h2>{testError.model} 测试失败</h2><p>{testError.detail}</p><button type="button" className="model-test-button" onClick={() => setTestError(null)}>知道了</button></section></div>}
   </main>;
 }

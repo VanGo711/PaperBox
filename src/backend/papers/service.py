@@ -14,7 +14,7 @@ import httpx
 from pypdf import PdfReader
 
 from src.backend.context.powercontext import PowerContextService
-from src.backend.vector.markdown import PaperChunk, _split_text
+from src.backend.vector.markdown import PaperChunk
 from src.backend.vector.service import PaperVectorService
 
 HIERARCHY_FIELDS = ("primaryResearchField", "secondaryResearchField", "coreTechnology")
@@ -24,9 +24,99 @@ class PaperImportError(RuntimeError):
     pass
 
 
+PDF_SECTION_HEADING = re.compile(
+    r"^(?:(?:\d+(?:\.\d+){0,3}|[IVXLC]+)[.、\s]+)?(?:abstract|introduction|related work|background|method(?:ology)?|experiment(?:s)?|evaluation|results?|discussion|conclusion|references|appendix|摘要|引言|相关工作|方法|实验|结果|结论|参考文献)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _clean_pdf_line(value: str) -> str:
+    value = value.replace("\u00ad", "").replace("\ufb01", "fi").replace("\ufb02", "fl")
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", value)
+    return re.sub(r"[ \t]+", " ", value).strip()
+
+
+def _margin_key(value: str) -> str:
+    return re.sub(r"\d+", "#", _clean_pdf_line(value).casefold())
+
+
+def _is_page_number(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:page\s*)?\d+(?:\s*/\s*\d+)?", value, flags=re.IGNORECASE))
+
+
+def _is_section_heading(value: str) -> bool:
+    if PDF_SECTION_HEADING.match(value):
+        return True
+    letters = re.sub(r"[^A-Za-z]", "", value)
+    return len(value) <= 110 and len(letters) >= 4 and letters.isupper()
+
+
+def _join_pdf_lines(lines: list[str]) -> str:
+    paragraphs: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        joined = ""
+        for line in current:
+            if not joined:
+                joined = line
+            elif re.search(r"[A-Za-z]-$", joined) and re.match(r"[a-z]", line):
+                joined = joined[:-1] + line
+            else:
+                joined = f"{joined} {line}"
+        if joined:
+            paragraphs.append(joined)
+        current.clear()
+
+    for raw_line in lines:
+        line = _clean_pdf_line(raw_line)
+        if not line:
+            flush()
+            continue
+        if _is_page_number(line):
+            continue
+        if _is_section_heading(line):
+            flush()
+            paragraphs.append(line)
+            continue
+        current.append(line)
+    flush()
+    return "\n\n".join(paragraphs)
+
+
+def _remove_repeated_page_margins(raw_pages: list[str]) -> list[str]:
+    """Remove repeated headers and footers without stripping body text."""
+    if len(raw_pages) < 3:
+        return raw_pages
+    counts: Counter[str] = Counter()
+    page_lines: list[list[str]] = []
+    for page in raw_pages:
+        lines = [_clean_pdf_line(line) for line in page.splitlines()]
+        lines = [line for line in lines if line]
+        page_lines.append(lines)
+        counts.update({_margin_key(line) for line in [*lines[:3], *lines[-3:]] if len(_margin_key(line)) >= 4})
+    threshold = max(2, (len(raw_pages) * 3 + 4) // 5)
+    repeated = {key for key, count in counts.items() if count >= threshold}
+    cleaned: list[str] = []
+    for lines in page_lines:
+        margin_indexes = set(range(min(3, len(lines)))) | set(range(max(0, len(lines) - 3), len(lines)))
+        kept = [line for index, line in enumerate(lines) if not (index in margin_indexes and _margin_key(line) in repeated)]
+        cleaned.append(_join_pdf_lines(kept))
+    return cleaned
+
+
 def extract_pdf_pages(path: Path) -> list[str]:
     try:
-        return [(page.extract_text() or "").strip() for page in PdfReader(path).pages]
+        raw_pages: list[str] = []
+        for page in PdfReader(path).pages:
+            try:
+                text = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:  # pypdf releases before layout extraction support.
+                text = page.extract_text() or ""
+            raw_pages.append(text)
+        return _remove_repeated_page_margins(raw_pages)
     except Exception as error:
         raise PaperImportError(f"PDF 解析失败：{error}") from error
 
@@ -554,26 +644,133 @@ def delete_paper(path: Path, root: Path, vectors: PaperVectorService, context: P
     return {"deleted": relative_directory.as_posix(), "vector_sources": len(pdf_files)}
 
 
-def pdf_chunks(path: Path, root: Path, *, chunk_size: int, overlap: int) -> tuple[list[PaperChunk], list[str]]:
-    pages = extract_pdf_pages(path)
+def _sentence_units(paragraph: str) -> list[str]:
+    units = [unit.strip() for unit in re.split(r"(?<=[。！？!?])\s+|(?<=[.;])\s+(?=[A-Z])", paragraph) if unit.strip()]
+    return units or [paragraph.strip()]
+
+
+def _split_long_sentence(sentence: str, target: int) -> list[str]:
+    parts: list[str] = []
+    remaining = sentence.strip()
+    while len(remaining) > target:
+        candidates = [remaining.rfind(mark, 0, target) for mark in (", ", "，", ": ", "；", " ")]
+        cut = max(candidates)
+        if cut < target // 2:
+            cut = target
+        else:
+            cut += 1
+        parts.append(remaining[:cut].strip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _overlap_sentences(units: list[str], budget: int) -> list[str]:
+    overlap: list[str] = []
+    size = 0
+    for unit in reversed(units):
+        next_size = len(unit) + (2 if overlap else 0)
+        if overlap and size + next_size > budget:
+            break
+        overlap.insert(0, unit)
+        size += next_size
+    return overlap
+
+
+def _split_pdf_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Build sentence-complete chunks from already normalized PDF page text."""
+    target = max(700, chunk_size)
+    overlap_budget = min(max(80, overlap), target // 3)
+    units: list[str] = []
+    for paragraph in (part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()):
+        for sentence in _sentence_units(paragraph):
+            units.extend(_split_long_sentence(sentence, target))
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for unit in units:
+        separator = 2 if current else 0
+        if current and current_size + separator + len(unit) > target:
+            chunks.append("\n\n".join(current))
+            current = _overlap_sentences(current, overlap_budget)
+            current_size = sum(len(item) for item in current) + max(0, len(current) - 1) * 2
+        if current and current_size + 2 + len(unit) > target:
+            # An overlap that would crowd out a complete sentence is not useful.
+            current = []
+            current_size = 0
+        current.append(unit)
+        current_size += len(unit) + (2 if len(current) > 1 else 0)
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def pdf_chunks(
+    path: Path,
+    root: Path,
+    *,
+    chunk_size: int,
+    overlap: int,
+    pages: list[str] | None = None,
+    title: str | None = None,
+) -> tuple[list[PaperChunk], list[str]]:
+    pages = pages if pages is not None else extract_pdf_pages(path)
     relative = path.relative_to(root).as_posix()
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     parts = path.relative_to(root).parts
     category = parts[0] if parts else "未分类"
-    book = path.stem
+    book = _compact_text(title or path.stem) or path.stem
     chunks: list[PaperChunk] = []
     char_cursor = 0
     for page_number, page_text in enumerate(pages, start=1):
         page_start = char_cursor
         char_cursor += len(page_text) + 1
-        for text in _split_text(page_text, chunk_size, overlap):
+        for text in _split_pdf_text(page_text, chunk_size, overlap):
             start = page_text.find(text)
             start = max(0, start)
             end = start + len(text)
             index = len(chunks)
             identifier = hashlib.sha256(f"{relative}:{index}:{text}".encode("utf-8")).hexdigest()
-            chunks.append(PaperChunk(identifier, f"第 {page_number} 页\n\n{text}", relative, category, book, f"第 {page_number} 页", f"第 {page_number} 页", page_number, page_number, page_start + start, page_start + end, index, digest))
+            embedded = f"论文：{book}\n页码：第 {page_number} 页\n\n{text}"
+            chunks.append(PaperChunk(identifier, embedded, relative, category, book, f"第 {page_number} 页", f"第 {page_number} 页", page_number, page_number, page_start + start, page_start + end, index, digest))
     return chunks, pages
+
+
+def reindex_pdf(
+    path: Path,
+    root: Path,
+    vectors: PaperVectorService,
+    context: PowerContextService,
+) -> dict:
+    """Rebuild retrieval data from existing metadata without another LLM call."""
+    pages = extract_pdf_pages(path)
+    if not any(pages):
+        raise PaperImportError("PDF 中未提取到可检索文本；扫描件请先完成 OCR。")
+    try:
+        metadata = json.loads((path.parent / ".paperbox.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        metadata = {}
+    title = _compact_text(str(metadata.get("title") or path.stem)) or path.stem
+    chunks, _ = pdf_chunks(
+        path,
+        root,
+        chunk_size=vectors.settings.chunk_size,
+        overlap=vectors.settings.chunk_overlap,
+        pages=pages,
+        title=title,
+    )
+    if not chunks:
+        raise PaperImportError("PDF 清洗后没有可嵌入的正文文本；扫描件请先完成 OCR。")
+    indexed = vectors.index_chunks(chunks)
+    source_path = path.relative_to(root).as_posix()
+    captured = context.capture_document(
+        source_path=source_path,
+        title=title,
+        content="\n\n".join(f"第 {number} 页\n{text}" for number, text in enumerate(pages, start=1) if text),
+        metadata={"pages": len(pages), "chunks": len(chunks), "document_hash": chunks[0].document_hash},
+    )
+    return {"index": indexed, "powercontext": captured, "pages": len(pages), "title": title}
 
 
 def index_pdf(
@@ -588,8 +785,8 @@ def index_pdf(
 ) -> dict:
     if progress:
         progress("正在解析 PDF")
-    chunks, pages = pdf_chunks(path, root, chunk_size=vectors.settings.chunk_size, overlap=vectors.settings.chunk_overlap)
-    if not chunks:
+    pages = extract_pdf_pages(path)
+    if not any(pages):
         raise PaperImportError("PDF 中未提取到可检索文本；扫描件请先完成 OCR。")
     _check_cancelled(cancelled)
     if progress:
@@ -603,6 +800,17 @@ def index_pdf(
     _check_cancelled(cancelled)
     _write_metadata(path, metadata)
     _apply_taxonomy_updates(root, metadata.get("taxonomyUpdates", []))
+    document_title = _compact_text(str(metadata.get("title") or title)) or title
+    chunks, _ = pdf_chunks(
+        path,
+        root,
+        chunk_size=vectors.settings.chunk_size,
+        overlap=vectors.settings.chunk_overlap,
+        pages=pages,
+        title=document_title,
+    )
+    if not chunks:
+        raise PaperImportError("PDF 清洗后没有可嵌入的正文文本；扫描件请先完成 OCR。")
     if progress:
         progress("正在写入向量数据库")
     indexed = vectors.index_chunks(chunks)
@@ -612,7 +820,7 @@ def index_pdf(
         progress("正在写入 PowerContext 上下文")
     captured = context.capture_document(
         source_path=source_path,
-        title=title,
+        title=document_title,
         content="\n\n".join(f"第 {number} 页\n{text}" for number, text in enumerate(pages, start=1) if text),
         metadata={"pages": len(pages), "chunks": len(chunks), "document_hash": chunks[0].document_hash},
     )

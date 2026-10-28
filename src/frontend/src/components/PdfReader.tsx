@@ -11,11 +11,47 @@ interface PdfReaderProps {
   onPageCount?(count: number): void;
   onCurrentPageChange?(page: number): void;
   highlightQuery?: string;
+  highlightText?: string;
 }
 
 interface HighlightRect { left: number; top: number; width: number; height: number; }
 
-export function PdfReader({ src, activePage = 1, onPageCount, onCurrentPageChange, highlightQuery = '' }: PdfReaderProps) {
+interface CitationRange { start: number; end: number; }
+
+function normalizeForMatch(value: string) {
+  return value.replace(/^\s*论文[：:][^\n]*(?:\n\s*)+页码[：:][^\n]*(?:\n\s*)*/i, '')
+    .replace(/^\s*第\s*\d+\s*页\s*/i, '')
+    .replace(/\u00ad/g, '')
+    .replace(/[‐‑‒–—]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase();
+}
+
+function citationRanges(items: string[], citation: string): CitationRange[] {
+  const documentText = items.map(normalizeForMatch).filter(Boolean).join(' ');
+  const sourceText = normalizeForMatch(citation);
+  if (!documentText || sourceText.length < 32) return [];
+  const sentences = sourceText.split(/(?<=[.!?。！？])\s+/).filter((sentence) => sentence.length >= 32);
+  const ranges: CitationRange[] = [];
+  for (const sentence of sentences.slice(0, 5)) {
+    let found: CitationRange | null = null;
+    for (const size of [180, 120, 80, 48]) {
+      if (sentence.length < size) continue;
+      for (let offset = 0; offset <= sentence.length - size; offset += Math.max(20, Math.floor(size / 2))) {
+        const phrase = sentence.slice(offset, offset + size).trim();
+        const start = documentText.indexOf(phrase);
+        if (start >= 0) { found = { start, end: start + phrase.length }; break; }
+      }
+      if (found) break;
+    }
+    if (found && !ranges.some((range) => found!.start < range.end && found!.end > range.start)) ranges.push(found);
+    if (ranges.length >= 3) break;
+  }
+  return ranges;
+}
+
+export function PdfReader({ src, activePage = 1, onPageCount, onCurrentPageChange, highlightQuery = '', highlightText = '' }: PdfReaderProps) {
   const [pageNumbers, setPageNumbers] = useState<number[]>([]);
   const [highlights, setHighlights] = useState<Map<number, HighlightRect[]>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -101,23 +137,33 @@ export function PdfReader({ src, activePage = 1, onPageCount, onCurrentPageChang
         } finally {
           if (renderTaskRef.current === renderTask) renderTaskRef.current = null;
         }
-        if (normalizedQuery) {
+        if (normalizedQuery || highlightText.trim()) {
           const textContent = await page.getTextContent();
+          const items = textContent.items.flatMap((item) => 'str' in item && item.str ? [item] : []);
+          const normalizedItems = items.map((item) => normalizeForMatch(item.str));
+          const exactRanges = citationRanges(normalizedItems, highlightText);
+          let offset = 0;
           const rectangles: HighlightRect[] = [];
-          for (const item of textContent.items) {
-            if (!('str' in item)) continue;
+          for (let index = 0; index < items.length; index += 1) {
+            const item = items[index];
             const text = item.str;
             const normalizedText = text.toLocaleLowerCase();
-            if (!normalizedText.includes(normalizedQuery)) continue;
+            const normalizedItem = normalizedItems[index];
+            const itemStart = offset;
+            const itemEnd = itemStart + normalizedItem.length;
+            offset = itemEnd + 1;
+            const matches = exactRanges.length
+              ? exactRanges.filter((range) => range.start < itemEnd && range.end > itemStart).map(() => ({ start: 0, end: text.length }))
+              : normalizedQuery && normalizedText.includes(normalizedQuery)
+              ? [{ start: normalizedText.indexOf(normalizedQuery), end: normalizedText.indexOf(normalizedQuery) + normalizedQuery.length }]
+              : [];
+            if (!matches.length) continue;
             const transform = pdfjs.Util.transform(viewport.transform, item.transform);
             const height = Math.max(8, Math.hypot(transform[2], transform[3]));
-            let start = normalizedText.indexOf(normalizedQuery);
-            while (start >= 0) {
-              const end = start + normalizedQuery.length;
+            for (const { start, end } of matches) {
               const left = transform[4] + item.width * scale * (start / Math.max(1, text.length));
               const highlightWidth = Math.max(5, item.width * scale * ((end - start) / Math.max(1, text.length)));
               rectangles.push({ left, top: transform[5] - height, width: highlightWidth, height });
-              start = normalizedText.indexOf(normalizedQuery, end);
             }
           }
           if (rectangles.length) nextHighlights.set(pageNumber, rectangles);
@@ -132,13 +178,13 @@ export function PdfReader({ src, activePage = 1, onPageCount, onCurrentPageChang
       cancelled = true;
       renderTaskRef.current?.cancel();
     };
-  }, [highlightQuery, pageNumbers, pdfDocument, zoom]);
+  }, [highlightQuery, highlightText, pageNumbers, pdfDocument, zoom]);
 
   useEffect(() => {
-    if (currentPageRef.current === activePage) return;
     currentPageRef.current = activePage;
-    pageRefs.current.get(activePage)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [activePage]);
+    const frame = requestAnimationFrame(() => pageRefs.current.get(activePage)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    return () => cancelAnimationFrame(frame);
+  }, [activePage, pageNumbers]);
 
   useEffect(() => {
     const root = readerRef.current;

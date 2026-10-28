@@ -302,8 +302,23 @@ function paperLibraryPlugin() {
         const query = (url.searchParams.get('query') ?? '').trim().toLowerCase();
         if (!query) return sendJson(response, 200, { results: [] });
         if (!(await stat(resolvedPath)).isDirectory()) return sendJson(response, 400, { error: '论文检索范围无效。' });
-        const results: Array<{ sourcePath: string; title: string; excerpt: string; page?: number }> = [];
-        for (const filePath of await walkFiles(resolvedPath)) {
+        const results: Array<{ sourcePath: string; title: string; before: string; match: string; after: string; page?: number }> = [];
+        const addMatches = (content: string, normalizedContent: string, sourcePath: string, title: string, page?: number) => {
+          let offset = 0;
+          while (offset <= normalizedContent.length - query.length) {
+            const index = normalizedContent.indexOf(query, offset);
+            if (index < 0) break;
+            const before = compactText(content.slice(Math.max(0, index - 100), index));
+            const match = content.slice(index, index + query.length);
+            const after = compactText(content.slice(index + query.length, Math.min(content.length, index + query.length + 180)));
+            results.push({ sourcePath, title, page, before, match, after });
+            offset = index + Math.max(1, query.length);
+          }
+        };
+        const scopedFiles = await walkFiles(resolvedPath);
+        const pdfFiles = scopedFiles.filter((filePath) => extname(filePath).toLowerCase() === '.pdf');
+        const searchFiles = pdfFiles.length ? pdfFiles : scopedFiles;
+        for (const filePath of searchFiles) {
           const extension = extname(filePath).toLowerCase();
           if (extension !== '.md' && extension !== '.pdf') continue;
           const content = extension === '.pdf'
@@ -312,17 +327,14 @@ function paperLibraryPlugin() {
           if (extension === '.pdf') {
             const pages = content.split('\f');
             pages.forEach((pageContent, pageIndex) => {
-              const index = pageContent.toLowerCase().indexOf(query);
-              if (index < 0 || results.length >= 50) return;
-              results.push({ sourcePath: relative(workspaceRoot, filePath).split('\\').join('/'), title: filePath.split(/[\\/]/).pop()?.replace(/\.pdf$/i, '') ?? '未命名论文', page: pageIndex + 1, excerpt: compactText(pageContent.slice(Math.max(0, index - 100), Math.min(pageContent.length, index + query.length + 180))) });
+              addMatches(pageContent, pageContent.toLowerCase(), relative(workspaceRoot, filePath).split('\\').join('/'), filePath.split(/[\\/]/).pop()?.replace(/\.pdf$/i, '') ?? '未命名论文', pageIndex + 1);
             });
           } else {
-            const index = content.toLowerCase().indexOf(query);
-            if (index >= 0) results.push({ sourcePath: relative(workspaceRoot, filePath).split('\\').join('/'), title: filePath.split(/[\\/]/).pop()?.replace(/\.md$/i, '') ?? '未命名章节', excerpt: content.slice(Math.max(0, index - 70), Math.min(content.length, index + query.length + 100)).replace(/\s+/g, ' ').trim() });
+            const normalizedContent = content.toLowerCase();
+            addMatches(content, normalizedContent, relative(workspaceRoot, filePath).split('\\').join('/'), filePath.split(/[\\/]/).pop()?.replace(/\.md$/i, '') ?? '未命名章节');
           }
-          if (results.length >= 50) break;
         }
-        return sendJson(response, 200, { results });
+        return sendJson(response, 200, { results, totalMatches: results.length });
       }
       return sendJson(response, 404, { error: '论文接口不存在。' });
     } catch {
@@ -596,7 +608,7 @@ async function askQwenModel(platform: any, model: unknown, question: unknown, co
   const ragContext = String(context ?? '').trim();
   if (!baseUrl || !platform.apiKey?.trim() || !modelId) throw new Error('缺少平台、密钥或模型标识。');
   if (!userQuestion || !ragContext) throw new Error('问题或检索上下文为空，无法生成回答。');
-  if (userQuestion.length > 4_000 || ragContext.length > 20_000) throw new Error('问题或检索上下文超出允许长度。');
+  if (userQuestion.length > 4_000 || ragContext.length > 120_000) throw new Error('问题或检索上下文超出模型桥接允许长度。');
   const messages = knowledgeChatMessages(userQuestion, ragContext, history);
   const modalities = await readQwenModelModalities(platform.id, modelId);
   let response: Response | undefined;
@@ -610,9 +622,9 @@ async function askQwenModel(platform: any, model: unknown, question: unknown, co
       body: JSON.stringify({
         model: modelId,
         input: { messages: qwenInputMessages(messages, multimodal) },
-        parameters: qwenGenerationParameters(modelId, { result_format: 'message', max_tokens: 1_400, temperature: 0.2 }, multimodal)
+        parameters: qwenGenerationParameters(modelId, { result_format: 'message', temperature: 0.2 }, multimodal)
       }),
-      signal: AbortSignal.timeout(90_000)
+      signal: AbortSignal.timeout(300_000)
     });
     payload = await response.json().catch(() => ({}));
     if (response.ok) break;
@@ -695,13 +707,13 @@ async function streamQwenModel(platform: any, model: unknown, question: unknown,
   const modelId = String(model ?? '').trim();
   const userQuestion = String(question ?? '').trim();
   const ragContext = String(context ?? '').trim();
-  const maxContextLength = 20_000;
+  const maxContextLength = 120_000;
   if (!baseUrl || !platform.apiKey?.trim() || !modelId) throw new Error('缺少平台、密钥或模型标识。');
   if (!userQuestion || !ragContext) throw new Error('问题或检索上下文为空，无法生成回答。');
   if (userQuestion.length > 4_000 || ragContext.length > maxContextLength) throw new Error('问题或检索上下文超出允许长度。');
   const controller = new AbortController();
   const onClose = () => { if (!response.writableEnded) controller.abort(); };
-  const timeout = setTimeout(() => controller.abort(), 90_000);
+  const timeout = setTimeout(() => controller.abort(), 300_000);
   response.on('close', onClose);
   let messages: any[] = [];
   try {
@@ -717,7 +729,7 @@ async function streamQwenModel(platform: any, model: unknown, question: unknown,
         body: JSON.stringify({
           model: modelId,
           input: { messages: qwenInputMessages(messages, multimodal) },
-          parameters: qwenGenerationParameters(modelId, { result_format: 'message', incremental_output: true, max_tokens: 1_400, temperature: 0.2 }, multimodal)
+          parameters: qwenGenerationParameters(modelId, { result_format: 'message', incremental_output: true, temperature: 0.2 }, multimodal)
         }),
         signal: controller.signal
       });

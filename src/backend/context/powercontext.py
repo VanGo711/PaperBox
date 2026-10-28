@@ -109,8 +109,16 @@ class PowerContextService:
         self._save_scope_ids()
         return {"embedded": True, "deleted": True}
 
-    def prepare(self, question: str, *, max_bytes: int = 8000) -> dict[str, Any]:
-        scope_ids = list(self._scope_ids.values())
+    def prepare(self, question: str, *, source_paths: list[str] | None = None, max_bytes: int = 8000) -> dict[str, Any]:
+        """Prepare context globally or only from explicitly retrieved papers."""
+        if source_paths is None:
+            scope_ids = list(self._scope_ids.values())
+        else:
+            scope_ids = list(dict.fromkeys(
+                self._scope_ids[source_path]
+                for source_path in source_paths
+                if source_path in self._scope_ids
+            ))
         if not scope_ids:
             return {"embedded": True, "used": False, "content": ""}
 

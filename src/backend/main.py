@@ -81,7 +81,7 @@ class SearchRequest(BaseModel):
 
 class KnowledgeRetrieveRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    limit: int = Field(default=12, ge=1, le=20)
+    limit: int = Field(default=20, ge=1, le=20)
     previous_questions: list[str] = Field(default_factory=list, max_length=6)
 
 
@@ -109,8 +109,9 @@ def _paper_response(
     source_path = path.relative_to(project_root).as_posix()
     hierarchy = metadata.get("hierarchy") if isinstance(metadata, dict) and isinstance(metadata.get("hierarchy"), dict) else {}
     category = str(hierarchy.get("secondaryResearchField") or (metadata or {}).get("researchArea") or "待分类").strip()
+    display_title = str((metadata or {}).get("title") or "").strip() or title
     response = {
-        "id": path.relative_to(root).parent.as_posix(), "title": title, "category": category,
+        "id": path.relative_to(root).parent.as_posix(), "title": display_title, "category": category,
         "preview": preview, "sourcePath": path.parent.relative_to(project_root).as_posix(),
         "pdfPath": source_path, "chapters": [{"title": "论文 PDF", "sourcePath": source_path}],
         "markdownCount": 0, "imageCount": 0, "modifiedAt": path.stat().st_mtime_ns,
