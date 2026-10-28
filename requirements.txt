@@ -1,0 +1,9 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+seekdb>=1.4.0.dev2,<1.5
+pymysql>=1.1,<2
+powercontext[server]>=1.4.1,<1.5
+pypdf>=5,<7
+python-multipart>=0.0.9,<1
+httpx>=0.27,<1
+langgraph>=1.2,<2
