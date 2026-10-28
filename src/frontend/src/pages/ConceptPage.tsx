@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight, Focus, Maximize2, Minus, Network, Plus, Search, X } from 'lucide-react';
 import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { paperCatalog } from '../data/paperCatalog';
+import { demoPaperCatalog } from '../demo/runtime';
 
 interface RawConcept { 名称: string; 类型?: string; 别名?: string[]; 关系?: string; 说明?: string; 来源?: string[]; 子项?: RawConcept[]; }
 interface PaperRecord {
@@ -132,7 +132,7 @@ function TreeNode({ node, selectedId, query, collapsedIds, onSelect, onToggle, o
 }
 
 export function ConceptPage() {
-  const [papers, setPapers] = useState<PaperRecord[]>(() => paperCatalog as PaperRecord[]);
+  const papers = useMemo(() => demoPaperCatalog() as PaperRecord[], []);
   const { roots, allNodes, nodeById } = useMemo(() => paperHierarchy(papers), [papers]);
   const collapsedBelowFirstLevel = () => new Set(allNodes.filter((node) => node.children.length > 0 && node.depth >= 1).map((node) => node.id));
   const [query, setQuery] = useState('');
@@ -150,23 +150,6 @@ export function ConceptPage() {
   const selectedNode = selectedId ? nodeById.get(selectedId) : undefined;
   const detailNode = detailId ? nodeById.get(detailId) : undefined;
   const categoryCount = useMemo(() => allNodes.filter((node) => node.type !== '论文节点').length, [allNodes]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refreshPapers = () => fetch('/paper-api/catalog')
-      .then(async (response) => {
-        const payload = await response.json() as { papers?: PaperRecord[] };
-        if (!response.ok) throw new Error();
-        if (!cancelled) setPapers(payload.papers ?? []);
-      })
-      .catch(() => { /* The static hierarchy remains available when the local catalog is unavailable. */ });
-    void refreshPapers();
-    const timer = window.setInterval(() => { void refreshPapers(); }, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const positioned = useMemo(() => {
     const output: PositionedNode[] = [];

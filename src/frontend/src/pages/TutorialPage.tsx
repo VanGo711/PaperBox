@@ -1,7 +1,8 @@
 import { BookOpenCheck, FileText, FolderUp, LoaderCircle, PanelRightClose, PanelRightOpen, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { paperCatalog, type PaperDocument as MaterialDocument } from '../data/paperCatalog';
+import { type PaperDocument as MaterialDocument } from '../data/paperCatalog';
 import { PdfReader } from '../components/PdfReader';
+import { demoPaperCatalog, searchDemoPaper } from '../demo/runtime';
 
 interface ContentResult { sourcePath: string; title: string; before: string; match: string; after: string; page?: number; }
 type PaperListItem = MaterialDocument & { processing?: boolean; jobId?: string; processingError?: string; };
@@ -9,8 +10,8 @@ type PaperListItem = MaterialDocument & { processing?: boolean; jobId?: string; 
 export function TutorialPage() {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('全部类型');
-  const [papers, setPapers] = useState<PaperListItem[]>(paperCatalog);
-  const [selectedId, setSelectedId] = useState<string | null>(paperCatalog[0]?.id ?? null);
+  const [papers, setPapers] = useState<PaperListItem[]>(demoPaperCatalog);
+  const [selectedId, setSelectedId] = useState<string | null>(demoPaperCatalog()[0]?.id ?? null);
   const [activePdfPage, setActivePdfPage] = useState(1);
   const [pdfPageCount, setPdfPageCount] = useState(0);
   const [importing, setImporting] = useState(false);
@@ -29,51 +30,6 @@ export function TutorialPage() {
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const allCategories = useMemo(() => Array.from(new Set(papers.map((item) => item.category))), [papers]);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/paper-api/catalog')
-      .then(async (response) => {
-        const payload = await response.json() as { papers?: typeof paperCatalog; error?: string };
-        if (!response.ok) throw new Error(payload.error ?? '论文目录读取失败。');
-        const catalog = payload.papers;
-        if (!cancelled && catalog?.length) setPapers((current) => {
-          const pending = new Map(current.filter((paper) => paper.processing).map((paper) => [paper.id, paper]));
-          return catalog.map((paper) => pending.get(paper.id) ?? paper);
-        });
-      })
-      .catch(() => { /* Keep the generated catalog available when the local file API is unavailable. */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    const pending = papers.filter((paper) => paper.processing && paper.jobId);
-    if (!pending.length) return;
-    let cancelled = false;
-    const check = async () => {
-      const updates = await Promise.all(pending.map(async (paper) => {
-        try {
-          const response = await fetch(`/api/papers/imports/${encodeURIComponent(paper.jobId!)}`);
-          const job = await response.json() as { state?: string; pages?: number; index?: { chunks_indexed?: number }; error?: string; paper?: PaperListItem };
-          if (!response.ok || !job.state || job.state === 'queued' || job.state === 'processing') return null;
-          return { id: paper.id, state: job.state, pages: job.pages, chunks: job.index?.chunks_indexed, error: job.error, paper: job.paper };
-        } catch { return null; }
-      }));
-      if (cancelled) return;
-      const completed = new Map(updates.filter((update): update is NonNullable<typeof update> => Boolean(update)).map((update) => [update.id, update]));
-      if (!completed.size) return;
-      setPapers((current) => current.map((paper) => {
-        const update = completed.get(paper.id);
-        if (!update) return paper;
-        if (update.state === 'completed') return { ...paper, ...update.paper, processing: false, jobId: undefined, preview: update.paper?.preview ?? `已解析 ${update.pages ?? 0} 页，已建立 ${update.chunks ?? 0} 个向量块。` };
-        if (update.state === 'cancelled') return { ...paper, processing: false, jobId: undefined, processingError: '论文处理已停止。', preview: '论文处理已停止。' };
-        return { ...paper, processing: false, processingError: update.error ?? '论文处理失败。', preview: '论文处理失败。' };
-      }));
-    };
-    void check();
-    const timer = window.setInterval(() => { void check(); }, 1500);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [papers]);
 
   const visibleMaterials = useMemo(() => papers.filter((item) => {
     const matchedCategory = category === '全部类型' || item.category === category;
@@ -106,20 +62,28 @@ export function TutorialPage() {
     }
     setImporting(true);
     setImportError('');
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const response = await fetch('/api/papers/import', { method: 'POST', body: formData });
-      const payload = await response.json() as { paper?: typeof paperCatalog[number]; error?: string; detail?: string };
-      if (!response.ok || !payload.paper) throw new Error(payload.detail ?? payload.error ?? '论文导入失败。');
-      setPapers((current) => [payload.paper!, ...current.filter((item) => item.id !== payload.paper!.id)]);
-      setSelectedId(payload.paper.id);
-      setCategory('全部类型');
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : '论文导入失败。');
-    } finally {
-      setImporting(false);
-    }
+    const title = file.name.replace(/\.pdf$/i, '').replace(/[_-]+/g, ' ').trim() || '未命名论文';
+    const paper: PaperListItem = {
+      id: `local-${Date.now().toString(36)}`,
+      category: '本地导入',
+      title,
+      sourcePath: `local/${file.name}`,
+      pdfPath: URL.createObjectURL(file),
+      markdownCount: 0,
+      imageCount: 0,
+      modifiedAt: new Date().toISOString(),
+      preview: '仅在当前浏览器会话中预览；静态演示不会上传或保存文件。',
+      author: '本地文件',
+      researchArea: '待补充',
+      tags: ['本地导入', '临时预览'],
+      abstract: '这是本地选择的 PDF。静态演示不会调用模型、上传文件或建立持久化索引。',
+      summary: '可在右侧预览 PDF；预置论文仍可用于本地检索与知识问答。',
+      chapters: [],
+    };
+    setPapers((current) => [paper, ...current]);
+    setSelectedId(paper.id);
+    setCategory('全部类型');
+    window.setTimeout(() => setImporting(false), 180);
   };
 
   const searchContent = async (event: FormEvent) => {
@@ -127,18 +91,11 @@ export function TutorialPage() {
     if (!selected || !contentQuery.trim()) return;
     setSearchingContent(true);
     setSearchError('');
-    try {
-      const response = await fetch(`/paper-api/search?scope=${encodeURIComponent(selected.sourcePath)}&query=${encodeURIComponent(contentQuery.trim())}`);
-      const payload = await response.json() as { results?: ContentResult[]; totalMatches?: number; error?: string };
-      if (!response.ok) throw new Error(payload.error ?? '内容检索失败。');
-      setContentResults(payload.results ?? []);
-      setContentMatchCount(payload.totalMatches ?? payload.results?.length ?? 0);
-      setHighlightQuery(payload.results?.length ? contentQuery.trim() : '');
-    } catch (error) {
-      setSearchError(error instanceof Error ? error.message : '内容检索失败。');
-    } finally {
-      setSearchingContent(false);
-    }
+    const results = searchDemoPaper(selected, contentQuery.trim());
+    setContentResults(results);
+    setContentMatchCount(results.length);
+    setHighlightQuery(results.length ? contentQuery.trim() : '');
+    window.setTimeout(() => setSearchingContent(false), 120);
   };
 
   const closeContentSearch = () => {
@@ -150,20 +107,12 @@ export function TutorialPage() {
   const deletePaper = async (paper: PaperListItem) => {
     if (paper.processing || deletingId) return;
     setDeletingId(paper.id);
-    setImportError('');
-    try {
-      const response = await fetch(`/api/papers/${encodeURIComponent(paper.id)}`, { method: 'DELETE' });
-      const payload = await response.json() as { detail?: string };
-      if (!response.ok) throw new Error(payload.detail ?? '删除论文失败。');
-      setPapers((current) => current.filter((item) => item.id !== paper.id));
-      if (selectedId === paper.id) setSelectedId(null);
-      closeContentSearch();
-      setDeleteCandidate(null);
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : '删除论文失败。');
-    } finally {
-      setDeletingId(null);
-    }
+    if (paper.pdfPath?.startsWith('blob:')) URL.revokeObjectURL(paper.pdfPath);
+    setPapers((current) => current.filter((item) => item.id !== paper.id));
+    if (selectedId === paper.id) setSelectedId(null);
+    closeContentSearch();
+    setDeleteCandidate(null);
+    window.setTimeout(() => setDeletingId(null), 120);
   };
 
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
@@ -280,11 +229,11 @@ function MaterialDetail({ item, activePdfPage, pdfPageCount, onSelectPdfPage, on
   return <div className="library-detail">
     <div ref={workspaceRef} className={`library-workspace${chapterPanelVisible ? '' : ' is-chapter-panel-hidden'}`} style={{ '--chapter-panel-width': `${chapterPanelWidth}px` } as CSSProperties}>
       {chapterPanelVisible && <><aside className="library-summary-panel"><div className="library-chapter-heading"><span>内容摘要</span></div><div className="library-summary-scroll"><section className="library-summary-title"><strong>{item.title}</strong><small>{item.researchArea || item.category}</small></section><dl className="library-summary-meta"><div><dt>作者</dt><dd>{item.author || '未标注'}</dd></div><div><dt>研究领域</dt><dd>{item.researchArea || item.category || '未分类'}</dd></div></dl><section><h3>论文标签</h3><div className="library-summary-tags">{(item.tags?.length ? item.tags : [item.category]).map((tag) => <span key={tag}>{tag}</span>)}</div></section><section><h3>摘要</h3><p>{item.abstract || '暂无摘要信息。'}</p></section><section><h3>内容总结</h3><p>{item.summary || item.preview || '暂无内容总结。'}</p></section></div></aside><div className="chapter-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整内容摘要宽度" onPointerDown={startChapterResize} /></>}
-      <article className="library-reading-panel" onClick={onCloseSearch}><div className="library-reader-toolbar"><button type="button" className="library-import-button" onClick={onImport} disabled={importing} title="导入新的论文 PDF"><FolderUp size={15} />{importing ? '导入中' : '导入'}</button><form onClick={(event) => event.stopPropagation()} onSubmit={onSearch}><label><Search size={15} /><input value={contentQuery} onChange={(event) => onContentQueryChange(event.target.value)} placeholder="检索 PDF 内容" />{contentQuery && <button type="button" className="library-clear-search" title="清除 PDF 检索" aria-label="清除 PDF 检索" onClick={onClearContentSearch}><X size={14} /></button>}</label><button type="submit" className="library-search-submit" disabled={searchingContent || !contentQuery.trim() || !item.pdfPath} title="检索 PDF 内容" aria-label="检索 PDF 内容">{searchingContent ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}</button></form><div className="library-reader-title" title={item.title}><span>论文 PDF</span><small>{pdfPageCount ? `${activePdfPage} / ${pdfPageCount} 页` : '正在读取页数...'}</small></div><button type="button" className="chapter-panel-toggle" title={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} aria-label={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} onClick={toggleChapterPanel}>{chapterPanelVisible ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button></div>
+      <article className="library-reading-panel" onClick={onCloseSearch}><div className="library-reader-toolbar"><button type="button" className="library-import-button" onClick={onImport} disabled={importing} title="导入新的论文 PDF"><FolderUp size={15} />{importing ? '导入中' : '导入'}</button><form onClick={(event) => event.stopPropagation()} onSubmit={onSearch}><label><Search size={15} /><input value={contentQuery} onChange={(event) => onContentQueryChange(event.target.value)} placeholder="检索论文内容" />{contentQuery && <button type="button" className="library-clear-search" title="清除论文检索" aria-label="清除论文检索" onClick={onClearContentSearch}><X size={14} /></button>}</label><button type="submit" className="library-search-submit" disabled={searchingContent || !contentQuery.trim()} title="检索论文内容" aria-label="检索论文内容">{searchingContent ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}</button></form><div className="library-reader-title" title={item.title}><small>{pdfPageCount ? `${activePdfPage} / ${pdfPageCount} 页` : '本地演示数据'}</small></div><button type="button" className="chapter-panel-toggle" title={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} aria-label={chapterPanelVisible ? '收起内容摘要' : '展开内容摘要'} onClick={toggleChapterPanel}>{chapterPanelVisible ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button></div>
         {searchError && <div className="library-message error">{searchError}</div>}
         {importError && <div className="library-message error">{importError}</div>}
         {contentResults.length > 0 && <div className="library-search-results" onClick={(event) => event.stopPropagation()}><header><strong>检索到 {contentMatchCount} 处匹配</strong><button type="button" title="关闭检索结果" aria-label="关闭检索结果" onClick={onCloseSearch}><X size={15} /></button></header>{contentResults.map((result, index) => <button key={`${result.sourcePath}-${result.page ?? 0}-${index}`} onClick={() => onSelectPdfPage(result.page ?? 1)}><span>{result.page ? `第 ${result.page} 页` : result.title}</span><small>{result.before}<mark>{result.match}</mark>{result.after}</small></button>)}</div>}
-        {item.pdfPath ? <div className="library-pdf"><PdfReader src={`/paper-api/pdf?path=${encodeURIComponent(item.pdfPath)}`} activePage={activePdfPage} onPageCount={onPageCountChange} onCurrentPageChange={onSelectPdfPage} highlightQuery={highlightQuery} /></div> : <div className="library-pdf-empty"><FileText size={26} /><strong>暂无论文 PDF</strong><span>请点击右上角“导入”，选择要管理的论文 PDF 文件。</span><button type="button" onClick={onImport}><FolderUp size={15} />导入 PDF</button></div>}
+        {item.pdfPath?.startsWith('blob:') ? <div className="library-pdf"><PdfReader src={item.pdfPath} activePage={activePdfPage} onPageCount={onPageCountChange} onCurrentPageChange={onSelectPdfPage} highlightQuery={highlightQuery} /></div> : <div className="library-pdf-empty"><FileText size={26} /><strong>预置论文演示数据</strong><span>静态站点仅内置论文元数据、摘要、总结和本地检索片段，不包含原始 PDF 文件。</span><button type="button" onClick={onImport}><FolderUp size={15} />本地预览 PDF</button></div>}
       </article>
     </div>
   </div>;

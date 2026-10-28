@@ -179,13 +179,28 @@ npm --prefix src/frontend run dev
 npm run start
 ```
 
-该命令只启动后端。静态前端可先构建，再由现有的 Web 服务器托管 `src/frontend/dist/`：
+该命令只启动后端。若需要完整的本地论文处理能力，可配合此前端开发服务使用。
+
+## Qoder Site 静态演示发布
+
+当前前端可直接作为无后端演示站点发布。构建产物内置 10 篇论文的元数据、摘要、内容总结与分类；内容检索在浏览器中进行关键词排序，知识问答返回基于命中片段组织的预设回答。模型选择、任务队列和会话也只使用浏览器本地状态。
+
+这个模式不会读取 `.env`、不会请求 Ollama、Qwen、SeekDB 或 PowerContext，也不会上传用户选择的 PDF。导入 PDF 仅用于当前标签页的本地预览；刷新页面后自动移除。
+
+在项目根目录构建：
 
 ```bash
 npm --prefix src/frontend run build
 ```
 
-部署静态前端时，需要将 `/api` 反向代理到 `http://127.0.0.1:9200`；模型调用代理 `/model-api` 目前由 Vite 开发服务器提供，因此生产部署需保留等价的 Node 代理层或将该代理逻辑迁移到后端后再暴露公网。
+随后将 `src/frontend/dist/` 上传到 Qoder Site。若使用 CLI，进入前端目录后执行：
+
+```bash
+cd src/frontend
+sites deploy dist
+```
+
+静态演示不需要配置反向代理、数据库、模型密钥或 Python 环境。
 
 ## 首次使用与数据维护
 

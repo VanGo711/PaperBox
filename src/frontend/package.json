@@ -6,7 +6,6 @@
   "scripts": {
     "papers:catalog": "node scripts/generate-paper-catalog.mjs",
     "predev": "npm run papers:catalog",
-    "prebuild": "npm run papers:catalog",
     "dev": "node node_modules/vite/bin/vite.js",
     "build": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build",
     "preview": "node node_modules/vite/bin/vite.js preview"
@@ -24,6 +23,7 @@
   },
   "devDependencies": {
     "@types/react": "^18.3.27",
-    "@types/react-dom": "^18.3.7"
+    "@types/react-dom": "^18.3.7",
+    "wrangler": "^4.154.0"
   }
 }
